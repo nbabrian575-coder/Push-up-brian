@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Push Up’Brian">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#101828">
+<title>Push Up’Brian</title>
+<style>
+:root{color-scheme:dark;--bg:#101828;--pn:#1b2638;--tx:#eef1f6;--mu:#93a0b4;--tape:#ffd23f;--ok:#3ddc97;--ko:#ff5d6c;--wa:#ffb020;--cond:"Avenir Next Condensed","Arial Narrow",system-ui,sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 -apple-system,system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;display:grid;gap:12px;padding:max(14px,env(safe-area-inset-top)) 14px max(18px,env(safe-area-inset-bottom))}
+h1{margin:0;font:800 italic 28px/1 var(--cond);letter-spacing:.5px}
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;color:var(--mu);font-size:14px}
+.cnt{font:800 clamp(96px,30vw,150px)/.85 var(--cond);color:var(--tape);font-variant-numeric:tabular-nums}
+.side{text-align:right}
+.side b{display:block;font:800 40px/1 var(--cond);color:var(--ko)}
+#msg{padding:12px 14px;border-radius:10px;background:var(--pn);border-left:6px solid var(--mu);font-weight:600;min-height:52px;display:flex;align-items:center}
+#msg.ok{border-color:var(--ok)}#msg.wa{border-color:var(--wa)}#msg.ko{border-color:var(--ko)}
+.stage{position:relative;border-radius:20px;overflow:hidden;background:#05080f;aspect-ratio:16/9}
+.stage video,.stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform:scaleX(-1)}
+#dbg{color:var(--mu);font-size:13px;min-height:18px;font-variant-numeric:tabular-nums}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button,select{font:inherit;border:0;border-radius:14px;padding:14px 18px;color:var(--tx);background:var(--pn)}
+#go{flex:1;background:var(--tape);color:#101828;font-weight:800}
+label{display:flex;gap:8px;align-items:center;color:var(--mu);font-size:15px}
+details{background:var(--pn);border-radius:14px;padding:12px 16px;color:var(--mu);font-size:15px}
+summary{color:var(--tx);font-weight:600}
+li{margin:6px 0}
+</style>
+</head>
+<body>
+<main>
+<h1>Push Up’Brian</h1>
+<section class="top"><div><div class="cnt" id="count">0</div>pompes validées</div><div class="side"><b id="rej">0</b>refusées</div></section>
+<div id="msg">Appuie sur « Démarrer », puis mets-toi en position de pompe, de profil.</div>
+<div class="stage" id="stage"><video id="v" playsinline muted autoplay></video><canvas id="c"></canvas></div>
+<div id="dbg"></div>
+<div class="row"><button id="go">Démarrer</button><button id="rst">Remettre à zéro</button></div>
+<div class="row">
+<label><input type="checkbox" id="snd" checked> Voix</label>
+<label>Rigueur <select id="lvl"><option value="0">Souple</option><option value="1" selected>Normale</option><option value="2">Stricte</option></select></label>
+</div>
+<details><summary>Comment placer l’iPhone ?</summary>
+<ul>
+<li>Cale l’iPhone debout (contre un mur ou un sac), à environ 2 m, <b>sur le côté</b> : il doit te voir de profil, de la tête aux pieds. Le mode paysage est conseillé.</li>
+<li>Une pompe est validée si les coudes descendent à environ 100°, si tu remontes bras tendus et si le dos reste droit.</li>
+<li>La voix annonce le total ou la correction à faire. Si trop de pompes sont refusées, choisis « Souple ».</li>
+<li>Pour l’installer : Partager › Sur l’écran d’accueil.</li>
+</ul></details>
+</main>
+
+<script type="module">
+import {PoseLandmarker,FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+const $=i=>document.getElementById(i),v=$("v"),cv=$("c"),cx=cv.getContext("2d"),box=$("msg");
+const WASM="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODEL="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+// Seuils en degrés : UP = bras tendus, DOWN = profondeur maximale du coude, BODY = alignement épaule-hanche-cheville
+const LV=[{UP:150,DOWN:110,BODY:140},{UP:155,DOWN:100,BODY:150},{UP:165,DOWN:90,BODY:160}];
+const SIDE={l:[11,13,15,23,27],r:[12,14,16,24,28]};
+let pl,run=false,side,last=-1,E,B,st="WAIT",r,topT=0,ok=0,ko=0,wl,prev="",stream;
+
+const setMsg=(t,c="")=>{if(t!==prev){prev=t;box.textContent=t;box.className=c}};
+const speak=t=>{if(!$("snd").checked||!window.speechSynthesis)return;speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.lang="fr-FR";speechSynthesis.speak(u)};
+const win=()=>{ok++;$("count").textContent=ok;setMsg("Pompe validée","ok");speak(String(ok))};
+const fail=t=>{ko++;$("rej").textContent=ko;setMsg("Refusée : "+t,"ko");speak(t)};
+const lost=t=>{st="WAIT";topT=0;r=null;E=B=null;setMsg(t,"wa");$("dbg").textContent=""};
+const angle=(a,b,c)=>{const x1=a.x-b.x,y1=a.y-b.y,x2=c.x-b.x,y2=c.y-b.y,m=Math.hypot(x1,y1)*Math.hypot(x2,y2);return m?Math.acos(Math.max(-1,Math.min(1,(x1*x2+y1*y2)/m)))*57.2958:180};
+
+// Machine à états : WAIT (attend les bras tendus) → TOP (prêt) → GO (pompe en cours, jugée au retour en haut)
+function step(el,bo,sag,t,lv){
+ const {UP,DOWN,BODY}=lv;
+ if(st==="WAIT"){if(el>=UP){topT=topT||t;if(t-topT>500){st="TOP";setMsg("Prêt : descends !","ok")}}else topT=0;return}
+ if(st==="TOP"){if(el>=UP-25)return;st="GO";r={t0:t,depth:false,rose:false,bmin:180,sag:false}}
+ if(bo<r.bmin){r.bmin=bo;r.sag=sag}
+ if(el<=DOWN)r.depth=true;
+ if(r.depth&&el>DOWN+25)r.rose=true;
+ if(r.rose&&el<DOWN+10){fail("Remonte complètement");r={t0:t,depth:el<=DOWN,rose:false,bmin:bo,sag};return}
+ if(el>=UP){
+  st="TOP";
+  if(t-r.t0<300)return;
+  if(!r.depth)fail("Descends plus bas");
+  else if(r.bmin<BODY)fail(r.sag?"Hanches trop basses":"Fesses trop hautes");
+  else win();
+ }
+}
+
+function frame(L,t){
+ const W=v.videoWidth,H=v.videoHeight;
+ if(cv.width!==W||cv.height!==H){cv.width=W;cv.height=H;$("stage").style.aspectRatio=W+"/"+H}
+ cx.clearRect(0,0,W,H);
+ if(!L)return lost("Je ne te vois pas : mets-toi de profil, corps entier visible");
+ const vs=k=>SIDE[k].reduce((n,i)=>n+L[i].visibility,0),o=side==="l"?"r":"l";
+ if(!side||vs(o)>vs(side)+.5)side=vs("l")>=vs("r")?"l":"r";
+ const idx=SIDE[side];
+ if(Math.min(...idx.map(i=>L[i].visibility))<.35)return lost("Corps entier visible ? Recule l’iPhone et mets-toi de profil");
+ const [s,e,w,h,a]=idx.map(i=>({x:L[i].x*W,y:L[i].y*H}));
+ const lv=LV[$("lvl").value],el=angle(s,e,w),bo=angle(s,h,a);
+ E=E==null?el:E*.5+el*.5;B=B==null?bo:B*.5+bo*.5;
+ cx.lineWidth=Math.max(4,W/150);cx.lineCap=cx.lineJoin="round";
+ const path=(p,c)=>{cx.strokeStyle=c;cx.beginPath();p.forEach((q,i)=>i?cx.lineTo(q.x,q.y):cx.moveTo(q.x,q.y));cx.stroke()};
+ path([s,e,w],"#4da3ff");path([s,h,a],B<lv.BODY?"#ff5d6c":"#3ddc97");
+ cx.fillStyle="#fff";[s,e,w,h,a].forEach(q=>{cx.beginPath();cx.arc(q.x,q.y,cx.lineWidth*1.2,0,7);cx.fill()});
+ $("dbg").textContent=`Coude ${Math.round(E)}° · Dos ${Math.round(B)}°`;
+ if(Math.abs(s.y-a.y)>=.6*Math.abs(s.x-a.x))return lost("Mets-toi en position de pompe, de profil");
+ const lineY=s.y+(a.y-s.y)*((h.x-s.x)/((a.x-s.x)||1));
+ step(E,B,h.y>lineY,t,lv);
+}
+
+function loop(){
+ if(!run)return;
+ if(v.readyState>=2&&v.currentTime!==last){
+  last=v.currentTime;
+  try{const t=performance.now();frame(pl.detectForVideo(v,t).landmarks[0],t)}catch(err){console.error(err)}
+ }
+ requestAnimationFrame(loop);
+}
+
+const make=(fs,d)=>PoseLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:MODEL,delegate:d},runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.5,minTrackingConfidence:.5});
+
+function stop(){
+ run=false;stream&&stream.getTracks().forEach(t=>t.stop());stream=null;v.srcObject=null;
+ wl&&wl.release().catch(()=>{});wl=null;
+ $("go").textContent="Démarrer";cx.clearRect(0,0,cv.width,cv.height);st="WAIT";E=B=null;
+}
+
+$("go").onclick=async()=>{
+ if(run){stop();setMsg("Caméra arrêtée.");return}
+ speak("C’est parti");
+ try{
+  if(!navigator.mediaDevices)throw new Error("La caméra exige une page en https.");
+  setMsg("Chargement du détecteur de posture…");
+  const [s,fs]=await Promise.all([
+   navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:960},height:{ideal:540}},audio:false}),
+   FilesetResolver.forVisionTasks(WASM)
+  ]);
+  stream=s;v.srcObject=s;await v.play();
+  if(!pl){try{pl=await make(fs,"GPU")}catch{pl=await make(fs,"CPU")}}
+  try{wl=await navigator.wakeLock.request("screen")}catch{}
+  run=true;last=-1;$("go").textContent="Arrêter";
+  setMsg("Mets-toi en position de pompe, de profil","wa");
+  requestAnimationFrame(loop);
+ }catch(e){
+  stop();
+  setMsg(e.name==="NotAllowedError"?"Caméra refusée : autorise-la dans Réglages › Safari › Caméra.":"Impossible de démarrer : "+(e.message||e),"ko");
+ }
+};
+
+$("rst").onclick=()=>{ok=ko=0;$("count").textContent=0;$("rej").textContent=0;st="WAIT";r=null;topT=0;setMsg(run?"Compteur remis à zéro":"Appuie sur « Démarrer »")};
+</script>
+</body>
+</html>
